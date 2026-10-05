@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maple Street</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{margin:0;height:100%;overflow:hidden;background:#9ad;font-family:system-ui,sans-serif;
+  touch-action:none;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{display:block}
+#ov{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(10,20,40,.55);color:#fff;text-align:center;cursor:pointer;z-index:5}
+#ov div{background:rgba(0,0,0,.45);padding:24px 32px;border-radius:14px;max-width:320px}
+#ov h1{margin:0 0 8px;font-size:28px}
+#ov p{margin:4px 0;opacity:.9;font-size:14px}
+#hud{position:fixed;left:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));color:#fff;font-size:12px;text-shadow:0 1px 3px #000;z-index:4;pointer-events:none}
+#dot{position:fixed;left:50%;top:50%;width:4px;height:4px;margin:-2px;background:#fff;border-radius:50%;opacity:.7;z-index:4;pointer-events:none}
+#joy{position:fixed;left:24px;bottom:calc(30px + env(safe-area-inset-bottom,0px));width:110px;height:110px;border-radius:50%;
+  background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.25);display:none;z-index:4;touch-action:none}
+#knob{position:absolute;left:35px;top:35px;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.6);pointer-events:none}
+#sprint{position:fixed;right:24px;bottom:calc(40px + env(safe-area-inset-bottom,0px));width:78px;height:78px;border-radius:50%;
+  background:rgba(255,255,255,.18);border:2px solid rgba(255,255,255,.5);color:#fff;font:600 13px system-ui;
+  display:none;z-index:4;touch-action:none}
+#sprint.on{background:rgba(255,215,90,.55);border-color:#fff}
+#nb{position:fixed;right:14px;top:calc(14px + env(safe-area-inset-top,0px));z-index:6;padding:8px 12px;border:0;border-radius:8px;background:rgba(0,0,0,.5);color:#fff;font-size:13px}
+</style>
+</head>
+<body>
+<div id="ov"><div><h1>Maple Street</h1><p>Click to start walking</p><p><b>WASD</b> move · <b>Shift</b> sprint · <b>Mouse</b> look</p><p><b>N</b> day/night · <b>Esc</b> release mouse</p><p>Touch: left stick moves, drag right side to look</p></div></div>
+<div id="dot"></div><div id="hud">WASD / Shift / Mouse · N = day/night</div>
+<button id="nb">🌙 Night</button>
+<div id="joy"><div id="knob"></div></div>
+<button id="sprint">RUN</button>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.1,300);
+camera.rotation.order='YXZ';
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+let seed=7;const rnd=()=>{seed=(seed*16807)%2147483647;return seed/2147483647};
+const M=(c,o)=>new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.9},o||{}));
+const hemi=new THREE.HemisphereLight(0xcfe8ff,0x557744,.7);scene.add(hemi);
+const sun=new THREE.DirectionalLight(0xfff2d0,1);sun.position.set(50,80,30);sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);const sc=sun.shadow.camera;sc.left=-90;sc.right=90;sc.top=90;sc.bottom=-90;sc.far=250;
+scene.add(sun);
+
+// ground & roads
+const add=(g,m,x,y,z,sh)=>{const o=new THREE.Mesh(g,m);o.position.set(x,y,z);o.receiveShadow=true;if(sh)o.castShadow=true;scene.add(o);return o};
+add(new THREE.PlaneGeometry(400,400).rotateX(-Math.PI/2),M(0x4f8f3f),0,0,0);
+const road=M(0x333338),walk=M(0xb8b8b0),line=M(0xf0d040);
+add(new THREE.BoxGeometry(150,.05,8),road,0,.03,0);
+add(new THREE.BoxGeometry(8,.05,130),road,0,.035,0);
+[-5,5].forEach(z=>add(new THREE.BoxGeometry(150,.08,2),walk,0,.04,z));
+[-5,5].forEach(x=>add(new THREE.BoxGeometry(2,.08,130),walk,x,.045,0));
+for(let x=-72;x<72;x+=4)if(Math.abs(x)>6)add(new THREE.BoxGeometry(2,.02,.25),line,x,.07,0);
+for(let z=-62;z<62;z+=4)if(Math.abs(z)>6)add(new THREE.BoxGeometry(.25,.02,2),line,0,.075,z);
+
+// collisions
+const boxes=[],circles=[];
+const addBox=(x,z,w,d)=>boxes.push({x0:x-w/2,x1:x+w/2,z0:z-d/2,z1:z+d/2});
+
+// windows share material (night glow)
+const winMat=M(0x88b7dd,{emissive:0xffcc66,emissiveIntensity:0,roughness:.2});
+const lampMat=M(0xffffcc,{emissive:0xffdd88,emissiveIntensity:0});
+
+const wallCols=[0xe8d8b8,0xc9d9e8,0xe8b8a8,0xb8d8b8,0xf0e0a0,0xd8c0d8,0xe0e0e0];
+const roofCols=[0x8a3b2e,0x4a4a55,0x6b4a2e,0x2f4f5f];
+function house(x,z,rot){
+  const g=new THREE.Group(),w=7+rnd()*3,d=6+rnd()*2,h=3.6+rnd()*.8;
+  const wall=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),M(wallCols[rnd()*wallCols.length|0]));
+  wall.position.y=h/2;wall.castShadow=wall.receiveShadow=true;g.add(wall);
+  const rf=2.4+rnd()*.8;
+  const roof=new THREE.Mesh(new THREE.ConeGeometry(1,rf,4).rotateY(Math.PI/4),M(roofCols[rnd()*roofCols.length|0]));
+  roof.scale.set((w+1)/1.414,1,(d+1)/1.414);roof.position.y=h+rf/2;roof.castShadow=true;g.add(roof);
+  const door=new THREE.Mesh(new THREE.BoxGeometry(1.2,2.2,.12),M(0x5a3a22));door.position.set(0,1.1,d/2+.04);g.add(door);
+  const porch=new THREE.Mesh(new THREE.BoxGeometry(2.6,.2,1.4),M(0x999990));porch.position.set(0,.1,d/2+.6);g.add(porch);
+  const chim=new THREE.Mesh(new THREE.BoxGeometry(.9,2.2,.9),M(0x884433));chim.position.set(w/3,h+1.4,-d/4);chim.castShadow=true;g.add(chim);
+  [[-2.3,1],[2.3,1],[-2.3,-1],[2.3,-1]].forEach(([wx,s])=>{
+    const win=new THREE.Mesh(new THREE.BoxGeometry(1.3,1.2,.1),winMat);
+    win.position.set(wx*Math.min(1,w/7),2.1,s*(d/2+.03));g.add(win);
+  });
+  const path=new THREE.Mesh(new THREE.BoxGeometry(1.4,.06,6),M(0xaaa9a0));path.position.set(0,.04,d/2+3.5);path.receiveShadow=true;g.add(path);
+  g.position.set(x,0,z);g.rotation.y=rot;scene.add(g);
+  const sw=Math.abs(Math.sin(rot))>.5;addBox(x,z,sw?d:w,sw?w:d);
+  return {x,z,r:Math.max(w,d)/2+1.5};
+}
+const hs=[];
+[-56,-40,-24,24,40,56].forEach(x=>{hs.push(house(x,13,Math.PI));hs.push(house(x,-13,0))});
+[28,44].forEach(z=>{hs.push(house(13,z,-Math.PI/2));hs.push(house(-13,z,Math.PI/2));
+  hs.push(house(13,-z,-Math.PI/2));hs.push(house(-13,-z,Math.PI/2))});
+
+// trees
+const trunk=M(0x6b4a2e),leaf=[M(0x2f7a35),M(0x3f9a45),M(0x2a6a30)];
+function tree(x,z){
+  const s=.8+rnd()*.7,g=new THREE.Group();
+  const t=new THREE.Mesh(new THREE.CylinderGeometry(.2,.3,2.2,6),trunk);t.position.y=1.1;t.castShadow=true;g.add(t);
+  const l=leaf[rnd()*3|0];
+  [[3,1.6,2.4],[4.2,1.3,1.8]].forEach(([y,r,hh])=>{const c=new THREE.Mesh(new THREE.ConeGeometry(r,hh,8),l);c.position.y=y;c.castShadow=true;g.add(c)});
+  g.scale.setScalar(s);g.position.set(x,0,z);scene.add(g);circles.push({x,z,r:.45*s});
+}
+for(let i=0,n=0;i<600&&n<70;i++){
+  const x=(rnd()-.5)*150,z=(rnd()-.5)*130;
+  if(Math.abs(x)<8||Math.abs(z)<8)continue;
+  if(hs.some(h=>Math.hypot(h.x-x,h.z-z)<h.r+1))continue;
+  tree(x,z);n++;
+}
+for(let i=0;i<30;i++){ // outer woods
+  const a=rnd()*6.28,r=85+rnd()*20;tree(Math.cos(a)*r,Math.sin(a)*r);
+}
+
+// lamps
+function lamp(x,z){
+  const p=new THREE.Mesh(new THREE.CylinderGeometry(.08,.1,5,6),M(0x333333));p.position.set(x,2.5,z);p.castShadow=true;scene.add(p);
+  const b=new THREE.Mesh(new THREE.SphereGeometry(.3,8,8),lampMat);b.position.set(x,5.1,z);scene.add(b);
+  circles.push({x,z,r:.2});
+}
+for(let x=-60;x<=60;x+=20){if(Math.abs(x)>8){lamp(x,5.8);lamp(x,-5.8)}}
+for(let z=-56;z<=56;z+=20){if(Math.abs(z)>8){lamp(5.8,z);lamp(-5.8,z)}}
+
+// cars
+const carCols=[0xc0392b,0x2980b9,0xf1c40f,0xecf0f1,0x27ae60];
+function car(x,z,rot){
+  const g=new THREE.Group(),c=carCols[rnd()*5|0];
+  const b=new THREE.Mesh(new THREE.BoxGeometry(4.2,.9,1.9),M(c,{roughness:.4}));b.position.y=.7;b.castShadow=true;g.add(b);
+  const t=new THREE.Mesh(new THREE.BoxGeometry(2.2,.8,1.7),M(0x99bbdd,{roughness:.2}));t.position.set(-.2,1.5,0);t.castShadow=true;g.add(t);
+  [[-1.3,-.95],[1.3,-.95],[-1.3,.95],[1.3,.95]].forEach(([wx,wz])=>{
+    const w=new THREE.Mesh(new THREE.CylinderGeometry(.38,.38,.3,12).rotateX(Math.PI/2),M(0x111111));w.position.set(wx,.38,wz);g.add(w)});
+  g.position.set(x,0,z);g.rotation.y=rot;scene.add(g);
+  const sw=Math.abs(Math.sin(rot))>.5;addBox(x,z,sw?1.9:4.2,sw?4.2:1.9);
+}
+car(-30,-3,0);car(18,3,Math.PI);car(46,-3,0);car(-48,3,Math.PI);
+car(3,-35,Math.PI/2);car(-3,38,-Math.PI/2);car(3,52,Math.PI/2);
+
+// mailboxes
+for(let x=-56;x<=56;x+=16){if(Math.abs(x)<10)continue;
+  [[x+3,6.3],[x+3,-6.3]].forEach(([mx,mz])=>{
+    const m=new THREE.Mesh(new THREE.BoxGeometry(.4,.5,.7),M(0x2244aa));m.position.set(mx,1,mz);m.castShadow=true;scene.add(m);
+    const p=new THREE.Mesh(new THREE.BoxGeometry(.1,1,.1),M(0x553311));p.position.set(mx,.5,mz);scene.add(p);circles.push({x:mx,z:mz,r:.3})});
+}
+
+// ---------- player / input state ----------
+const P={x:0,z:9,yaw:Math.PI,pitch:0,bob:0};
+const keys={};
+let locked=false,night=false,touch=false,sprintTouch=false,running=false;
+
+const isTouch=matchMedia('(pointer:coarse)').matches||'ontouchstart' in window||navigator.maxTouchPoints>0;
+const ov=document.getElementById('ov');
+const cv=renderer.domElement;
+const joy=document.getElementById('joy'),knob=document.getElementById('knob'),sprintBtn=document.getElementById('sprint');
+
+// show touch UI right away on touch devices
+if(isTouch){
+  joy.style.display='block';
+  sprintBtn.style.display='block';
+  document.getElementById('hud').textContent='Left: move · Right: look · RUN: sprint';
+  ov.querySelector('div').innerHTML=
+    '<h1>Maple Street</h1><p>Tap to start walking</p>'+
+    '<p><b>Left side</b> drag to move</p>'+
+    '<p><b>Right side</b> drag to look</p>'+
+    '<p><b>RUN</b> toggles sprint · <b>🌙</b> day/night</p>';
+}
+
+// mark device as touch the moment a real touch happens (fires before the click)
+addEventListener('touchstart',()=>{touch=true},{once:true,capture:true});
+
+function startGame(){
+  running=true;
+  ov.style.display='none';
+  if(touch){locked=true;return}
+  cv.requestPointerLock&&cv.requestPointerLock();
+}
+ov.addEventListener('click',startGame);
+
+document.addEventListener('pointerlockchange',()=>{
+  if(touch)return;
+  locked=document.pointerLockElement===cv;
+  ov.style.display=locked?'none':'flex';
+});
+
+document.addEventListener('mousemove',e=>{
+  if(!locked||touch)return;
+  P.yaw-=e.movementX*.0022;P.pitch=Math.max(-1.4,Math.min(1.4,P.pitch-e.movementY*.0022));
+});
+addEventListener('keydown',e=>{keys[e.code]=true;if(e.code==='KeyN')toggleNight()});
+addEventListener('keyup',e=>{keys[e.code]=false});
+
+// ---------- touch controls ----------
+const tv={x:0,y:0};                       // virtual stick vector (-1..1)
+let joyId=null,lookId=null,lx=0,ly=0,joyBaseX=0,joyBaseY=0;
+const JOY_R=45, JOY_C=55;                 // max knob travel / half of the base size
+
+function showJoy(x,y){
+  joyBaseX=x;joyBaseY=y;
+  joy.style.left=(x-JOY_C)+'px';
+  joy.style.top=(y-JOY_C)+'px';
+  joy.style.bottom='auto';
+  joy.style.display='block';
+}
+
+document.addEventListener('touchstart',e=>{
+  if(!running)return;                     // first tap is handled by the overlay
+  let handled=false;
+  for(const t of e.changedTouches){
+    if(t.target&&t.target.closest&&t.target.closest('button'))continue; // let UI buttons work
+    if(t.clientX<innerWidth*.5){          // ---- left half: floating stick ----
+      if(joyId===null){
+        joyId=t.identifier;showJoy(t.clientX,t.clientY);knob.style.transform='';
+        handled=true;
+      }
+    }else{                                // ---- right half: look ----
+      if(lookId===null){
+        lookId=t.identifier;lx=t.clientX;ly=t.clientY;
+        handled=true;
+      }
+    }
+  }
+  if(handled)e.preventDefault();
+},{passive:false});
+
+document.addEventListener('touchmove',e=>{
+  if(!running)return;
+  for(const t of e.changedTouches){
+    if(t.identifier===joyId){
+      let dx=t.clientX-joyBaseX,dy=t.clientY-joyBaseY;
+      const l=Math.hypot(dx,dy);
+      if(l>JOY_R){dx*=JOY_R/l;dy*=JOY_R/l}
+      tv.x=dx/JOY_R;tv.y=dy/JOY_R;
+      knob.style.transform='translate('+dx+'px,'+dy+'px)';
+    }else if(t.identifier===lookId){
+      P.yaw-=(t.clientX-lx)*.005;
+      P.pitch=Math.max(-1.4,Math.min(1.4,P.pitch-(t.clientY-ly)*.005));
+      lx=t.clientX;ly=t.clientY;
+    }
+  }
+  e.preventDefault();
+},{passive:false});
+
+function endTouches(e){
+  for(const t of e.changedTouches){
+    if(t.identifier===joyId){joyId=null;tv.x=tv.y=0;knob.style.transform=''}
+    if(t.identifier===lookId)lookId=null;
+  }
+}
+document.addEventListener('touchend',endTouches);
+document.addEventListener('touchcancel',endTouches);
+
+// sprint toggle button
+function toggleSprint(){sprintTouch=!sprintTouch;sprintBtn.classList.toggle('on',sprintTouch)}
+sprintBtn.addEventListener('touchstart',e=>{e.preventDefault();e.stopPropagation();toggleSprint()},{passive:false});
+sprintBtn.addEventListener('click',()=>{if(!touch)toggleSprint()});
+
+// day / night
+const dayC=new THREE.Color(0x8fc4f0),nightC=new THREE.Color(0x0a1028);
+scene.background=dayC.clone();scene.fog=new THREE.Fog(0x8fc4f0,40,170);
+const nb=document.getElementById('nb');
+function toggleNight(){
+  night=!night;const c=night?nightC:dayC;
+  scene.background.copy(c);scene.fog.color.copy(c);
+  hemi.intensity=night?.18:.7;hemi.color.set(night?0x4455aa:0xcfe8ff);
+  sun.intensity=night?.15:1;sun.color.set(night?0x7788cc:0xfff2d0);
+  winMat.emissiveIntensity=night?.9:0;lampMat.emissiveIntensity=night?1.5:0;
+  nb.textContent=night?'☀️ Day':'🌙 Night';
+}
+nb.addEventListener('click',toggleNight);
+
+// movement
+function collide(){
+  const R=.4;
+  for(const b of boxes){
+    const cx=Math.max(b.x0,Math.min(P.x,b.x1)),cz=Math.max(b.z0,Math.min(P.z,b.z1));
+    let dx=P.x-cx,dz=P.z-cz,d=Math.hypot(dx,dz);
+    if(d<R){
+      if(d===0){P.x=b.x0-R;continue}
+      P.x=cx+dx/d*R;P.z=cz+dz/d*R;
+    }
+  }
+  for(const c of circles){
+    const dx=P.x-c.x,dz=P.z-c.z,d=Math.hypot(dx,dz),m=c.r+R;
+    if(d<m&&d>0){P.x=c.x+dx/d*m;P.z=c.z+dz/d*m}
+  }
+  P.x=Math.max(-95,Math.min(95,P.x));P.z=Math.max(-95,Math.min(95,P.z));
+}
+let last=performance.now();
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  let f=(keys.KeyW||keys.ArrowUp?1:0)-(keys.KeyS||keys.ArrowDown?1:0)-tv.y;
+  let s=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0)+tv.x;
+  const l=Math.hypot(f,s);if(l>1){f/=l;s/=l}
+  const sprinting=keys.ShiftLeft||keys.ShiftRight||sprintTouch;
+  const sp=(sprinting?8:4.2)*dt;
+  if(locked){
+    const sy=Math.sin(P.yaw),cy=Math.cos(P.yaw);
+    P.x+=(-sy*f+cy*s)*sp;P.z+=(-cy*f-sy*s)*sp;
+    collide();
+    if(l>0)P.bob+=dt*(sp/dt)*1.6;
+  }
+  camera.position.set(P.x,1.7+Math.sin(P.bob)*.04*(l>0?1:0),P.z);
+  camera.rotation.set(P.pitch,P.yaw,0);
+  sun.position.set(P.x+50,80,P.z+30);sun.target.position.set(P.x,0,P.z);sun.target.updateMatrixWorld();
+  renderer.render(scene,camera);
+}
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
